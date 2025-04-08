@@ -1,8 +1,10 @@
 package db
 
 import (
+	"encoding/gob"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,6 +17,7 @@ const (
 	TEXT DataType = "TEXT"
 	BOOL DataType = "BOOL"
 )
+const saveFile = "db.gob"
 
 type Column struct {
 	Name string
@@ -47,6 +50,8 @@ func HandleCommand(db *Database, input string) error {
 		return handleInsertInto(db, input)
 	case strings.HasPrefix(inputUpper, "SELECT"):
 		return handleSelect(db, input)
+	case strings.HasPrefix(inputUpper, "DELETE FROM"):
+		return handleDeleteFrom(db, input)
 	default:
 		return errors.New("Unsupported command")
 	}
@@ -223,4 +228,103 @@ func handleSelect(db *Database, input string) error {
 	}
 
 	return nil
+}
+
+// Пример: DELETE FROM users WHERE id = 1;
+func handleDeleteFrom(db *Database, input string) error {
+	re := regexp.MustCompile(`(?i)^DELETE FROM (\w+)\s+WHERE\s+(\w+)\s*=\s*(.+);?$`)
+	matches := re.FindStringSubmatch(input)
+	if len(matches) != 4 {
+		return errors.New("Invalid DELETE syntax")
+	}
+
+	tableName := matches[1]
+	columnName := matches[2]
+	valueStr := strings.TrimSpace(matches[3])
+
+	table, exists := db.Tables[tableName]
+	if !exists {
+		return fmt.Errorf("Table '%s' does not exist", tableName)
+	}
+
+	// Найти индекс колонки
+	colIndex := -1
+	colType := DataType("")
+	for i, col := range table.Columns {
+		if col.Name == columnName {
+			colIndex = i
+			colType = col.Type
+			break
+		}
+	}
+
+	if colIndex == -1 {
+		return fmt.Errorf("Column '%s' does not exist", columnName)
+	}
+
+	// Преобразовать значение
+	var parsedValue interface{}
+	switch colType {
+	case INT:
+		v, err := strconv.Atoi(valueStr)
+		if err != nil {
+			return fmt.Errorf("Invalid INT value: %s", valueStr)
+		}
+		parsedValue = v
+	case TEXT:
+		parsedValue = strings.Trim(valueStr, "'\"")
+	case BOOL:
+		lv := strings.ToLower(valueStr)
+		if lv == "true" {
+			parsedValue = true
+		} else if lv == "false" {
+			parsedValue = false
+		} else {
+			return fmt.Errorf("Invalid BOOL value: %s", valueStr)
+		}
+	}
+
+	// Удаляем строки
+	var newRows [][]interface{}
+	deleted := 0
+
+	for _, row := range table.Rows {
+		if row[colIndex] == parsedValue {
+			deleted++
+			continue
+		}
+		newRows = append(newRows, row)
+	}
+
+	table.Rows = newRows
+	fmt.Printf("Deleted %d row(s).\n", deleted)
+	return nil
+}
+
+func SaveToFile(db *Database) error {
+	file, err := os.Create(saveFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := gob.NewEncoder(file)
+	return encoder.Encode(db)
+}
+
+func LoadFromFile() (*Database, error) {
+	file, err := os.Open(saveFile)
+	if err != nil {
+		// Если файла нет — вернём пустую БД
+		return NewDatabase(), nil
+	}
+	defer file.Close()
+
+	decoder := gob.NewDecoder(file)
+	var db Database
+	err = decoder.Decode(&db)
+	if err != nil {
+		return nil, err
+	}
+	return &db, nil
 }
